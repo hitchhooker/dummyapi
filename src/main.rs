@@ -282,25 +282,17 @@ impl WebSocketServer {
     }
 
     async fn subscribe_account_state(&self, account: String, sender: broadcast::Sender<WebSocketMessage>) -> Result<(), WebSocketError> {
-        let dummy_info = IdentityInfo {
-            display: Data::Raw(b"Dummy Display".to_vec()),
-            legal: Data::Raw(b"Dummy Legal".to_vec()),
-            web: Data::Raw(b"https://dummy.web".to_vec()),
-            matrix: Data::Raw(b"@dummy:matrix.org".to_vec()),
-            email: Data::Raw(b"dummy@email.com".to_vec()),
-            pgp_fingerprint: Some([0; 20]),
-            image: Data::Raw(b"https://dummy.image/avatar.png".to_vec()),
-            twitter: Data::Raw(b"@dummy_twitter".to_vec()),
-            github: Data::Raw(b"dummy_github".to_vec()),
-            discord: Data::Raw(b"dummy_discord".to_vec()),
-        };
+        let dummy_info = self.get_dummy_identity_info();
 
-        let verification_state = self.get_verification_state(&account);
+        let verification_state = self.verification_states
+            .entry(account.clone())
+            .or_insert_with(|| VerificationState { verified_fields: Vec::new() })
+            .clone();
 
         let response = JsonResult::Ok(ResponsePayload::AccountState(ResponseAccountState {
             account: account.clone(),
             info: dummy_info,
-            judgements: vec![(0, Judgement::Unknown)],
+            judgements: vec![(0, Judgement::Reasonable)],
             verification_state,
         }));
 
@@ -341,21 +333,17 @@ impl WebSocketServer {
         sender.send(WebSocketMessage::JsonResult(result.clone()))?;
 
         if let JsonResult::Ok(ResponsePayload::VerificationResult(true)) = result {
-            self.notify_account_state(verify.account).await?;
+            self.notify_account_state(verify.account.clone()).await?;
         }
 
         Ok(())
     }
 
-    fn get_verification_state(&self, account: &str) -> VerificationState {
-        self.verification_states
-            .entry(account.to_string())
-            .or_insert_with(|| VerificationState { verified_fields: Vec::new() })
-            .clone()
-    }
-
     fn update_verification_state(&self, account: &str, field: &str, verified: bool) {
-        let mut state = self.get_verification_state(account);
+        let mut state = self.verification_states
+            .entry(account.to_string())
+            .or_insert_with(|| VerificationState { verified_fields: Vec::new() });
+
         if verified {
             if !state.verified_fields.contains(&field.to_string()) {
                 state.verified_fields.push(field.to_string());
@@ -363,25 +351,15 @@ impl WebSocketServer {
         } else {
             state.verified_fields.retain(|f| f != field);
         }
-        self.verification_states.insert(account.to_string(), state);
     }
 
-
     async fn notify_account_state(&self, account: String) -> Result<(), WebSocketError> {
-        let dummy_info = IdentityInfo {
-            display: Data::Raw(b"Updated Dummy Display".to_vec()),
-            legal: Data::Raw(b"Updated Dummy Legal".to_vec()),
-            web: Data::Raw(b"https://updated-dummy.web".to_vec()),
-            matrix: Data::Raw(b"@updated_dummy:matrix.org".to_vec()),
-            email: Data::Raw(b"updated_dummy@email.com".to_vec()),
-            pgp_fingerprint: Some([1; 20]),
-            image: Data::Raw(b"https://updated-dummy.image/avatar.png".to_vec()),
-            twitter: Data::Raw(b"@updated_dummy_twitter".to_vec()),
-            github: Data::Raw(b"updated_dummy_github".to_vec()),
-            discord: Data::Raw(b"updated_dummy_discord".to_vec()),
-        };
+        let dummy_info = self.get_dummy_identity_info();
 
-        let verification_state = self.get_verification_state(&account);
+        let verification_state = self.verification_states
+            .get(&account)
+            .map(|v| v.clone())
+            .unwrap_or_else(|| VerificationState { verified_fields: Vec::new() });
 
         let notification = NotifyAccountState {
             account: account.clone(),
@@ -398,6 +376,22 @@ impl WebSocketServer {
             }
         }
         Ok(())
+    }
+
+    // binary bitflags 1010011001, so registrar fields: 665
+    fn get_dummy_identity_info(&self) -> IdentityInfo {
+        IdentityInfo {
+            display: Data::Raw(b"Dummy Display".to_vec()),
+            legal: Data::None,
+            web: Data::None,
+            matrix: Data::Raw(b"@dummy:matrix.org".to_vec()),
+            email: Data::Raw(b"dummy@email.com".to_vec()),
+            pgp_fingerprint: None,
+            image: Data::None,
+            twitter: Data::Raw(b"@dummy_twitter".to_vec()),
+            github: Data::None,
+            discord: Data::Raw(b"dummy_discord".to_vec()),
+        }
     }
 }
 
