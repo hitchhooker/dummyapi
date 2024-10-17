@@ -1,10 +1,8 @@
-#[warn(unused_imports)]
-
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
-use tokio_tungstenite::tungstenite::Message;
-use futures_util::{SinkExt, StreamExt};
+use tokio_tungstenite::{tungstenite::Message,WebSocketStream};
+use futures_util::{SinkExt, StreamExt, stream::SplitSink};
 use serde::{Serialize, Deserialize};
 use dashmap::DashMap;
 use tokio::sync::broadcast;
@@ -146,6 +144,8 @@ pub enum WebSocketError {
     MessageTooLarge,
     #[error("Connection timed out")]
     ConnectionTimeout,
+    #[error("Connection closed")]
+    ConnectionClosed,
 }
 
 pub struct WebSocketServer {
@@ -182,43 +182,18 @@ impl WebSocketServer {
     async fn handle_connection(self: Arc<Self>, stream: TcpStream) -> Result<(), WebSocketError> {
         let ws_stream = tokio_tungstenite::accept_async(stream).await?;
         let (mut write, mut read) = ws_stream.split();
-
         let (tx, mut rx) = broadcast::channel(100);
 
         loop {
-            let self_clone = self.clone();
             tokio::select! {
                 Some(message) = read.next() => {
-                    match message {
-                        Ok(Message::Text(text)) => {
-                            if text.len() > MAX_MESSAGE_SIZE {
-                                return Err(WebSocketError::MessageTooLarge);
-                            }
-                            match serde_json::from_str::<VersionedMessage>(&text) {
-                                Ok(versioned_msg) => {
-                                    if let Err(e) = self_clone.handle_message(versioned_msg.message, tx.clone()).await {
-                                        eprintln!("Error handling message: {:?}", e);
-                                    }
-                                },
-                                Err(e) => {
-                                    eprintln!("Error parsing message: {:?}\nMessage content: {}", e, text);
-                                }
-                            }
-                        },
-                        Ok(Message::Close(_)) => {
-                            println!("WebSocket connection closed");
-                            break;
-                        },
-                        Err(e) => {
-                            eprintln!("WebSocket error: {:?}", e);
-                            break;
-                        },
-                        _ => {} // Ignore other message types
+                    if let Err(e) = self.process_incoming_message(message, &tx, &mut write).await {
+                        eprintln!("Error processing message: {:?}", e);
+                        break;
                     }
                 }
                 Ok(response) = rx.recv() => {
-                    let response_json = serde_json::to_string(&response)?;
-                    if let Err(e) = write.send(Message::Text(response_json)).await {
+                    if let Err(e) = self.send_response(&mut write, response).await {
                         eprintln!("Error sending response: {:?}", e);
                         break;
                     }
@@ -230,6 +205,62 @@ impl WebSocketServer {
             }
         }
         Ok(())
+    }
+
+    async fn process_incoming_message(
+        self: &Arc<Self>,
+        message: Result<Message, tokio_tungstenite::tungstenite::Error>,
+        tx: &broadcast::Sender<WebSocketMessage>,
+        write: &mut SplitSink<WebSocketStream<TcpStream>, Message>,
+    ) -> Result<(), WebSocketError> {
+        match message? {
+            Message::Text(text) => self.handle_text_message(text, tx, write).await?,
+            Message::Close(_) => {
+                println!("WebSocket connection closed");
+                return Err(WebSocketError::ConnectionClosed);
+            }
+            _ => {} // Ignore other message types
+        }
+        Ok(())
+    }
+
+    async fn handle_text_message(
+        self: &Arc<Self>,
+        text: String,
+        tx: &broadcast::Sender<WebSocketMessage>,
+        write: &mut SplitSink<WebSocketStream<TcpStream>, Message>,
+    ) -> Result<(), WebSocketError> {
+        if text.len() > MAX_MESSAGE_SIZE {
+            return Err(WebSocketError::MessageTooLarge);
+        }
+
+        match serde_json::from_str::<VersionedMessage>(&text) {
+            Ok(versioned_msg) => self.clone().handle_message(versioned_msg.message, tx.clone()).await?,
+            Err(e) => {
+                eprintln!("Error parsing message: {:?}\nMessage content: {}", e, text);
+                self.send_error_response(write, format!("Invalid JSON: {:?}", e)).await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn send_response(
+        &self,
+        write: &mut SplitSink<WebSocketStream<TcpStream>, Message>,
+        response: WebSocketMessage,
+    ) -> Result<(), WebSocketError> {
+        let response_json = serde_json::to_string(&response)?;
+        write.send(Message::Text(response_json)).await?;
+        Ok(())
+    }
+
+    async fn send_error_response(
+        &self,
+        write: &mut SplitSink<WebSocketStream<TcpStream>, Message>,
+        error: String,
+    ) -> Result<(), WebSocketError> {
+        let error_response = WebSocketMessage::JsonResult(JsonResult::Err(error));
+        self.send_response(write, error_response).await
     }
 
     async fn handle_message(self: Arc<Self>, message: WebSocketMessage, sender: broadcast::Sender<WebSocketMessage>) -> Result<(), WebSocketError> {
