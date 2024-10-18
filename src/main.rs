@@ -1,5 +1,4 @@
-use std::net::SocketAddr;
-use std::sync::Arc;
+use std::{net::SocketAddr, sync::Arc, collections::HashMap};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::{tungstenite::Message,WebSocketStream};
 use futures_util::{SinkExt, StreamExt, stream::SplitSink};
@@ -13,7 +12,7 @@ use rand::Rng;
 
 const MAX_MESSAGE_SIZE: usize = 1024 * 1024; // 1 MB
 const TIMEOUT_DURATION: Duration = Duration::from_secs(300); // 5 minutes
-const OLC_ALPHABET: &str = "23456789CFGHJMPQRVWX"; // human-friendly challenges
+const OLC_ALPHABET: &str = "23456789CFGHJMPQRVWX"; // human-friendly secrets
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VersionedMessage {
@@ -28,14 +27,13 @@ pub enum ResponsePayload {
     Challenge(String),
     VerificationResult(bool),
 }
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", content = "payload")]
 #[non_exhaustive]
 pub enum WebSocketMessage {
     SubscribeAccountState(String),
     NotifyAccountState(NotifyAccountState),
-    RequestVerificationChallenge(RequestVerificationChallenge),
+    RequestVerificationSecret(RequestVerificationSecret),
     VerifyIdentity(VerifyIdentity),
     JsonResult(JsonResult<ResponsePayload>),
 }
@@ -44,7 +42,6 @@ pub enum WebSocketMessage {
 pub struct NotifyAccountState {
     pub account: String,
     pub info: IdentityInfo,
-    pub judgements: Vec<(u32, Judgement)>,
     pub verification_state: VerificationState,
 }
 
@@ -52,17 +49,18 @@ pub struct NotifyAccountState {
 pub struct ResponseAccountState {
     pub account: String,
     pub info: IdentityInfo,
-    pub judgements: Vec<(u32, Judgement)>,
     pub verification_state: VerificationState,
+    pub pending_verification_steps: Vec<(String, String)>,
 }
+
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct VerificationState {
-    pub verified_fields: Vec<String>,
+    pub fields: HashMap<String, bool>, // Maps field name to a boolean indicating verification status
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct RequestVerificationChallenge {
+pub struct RequestVerificationSecret {
     pub account: String,
     pub field: String,
 }
@@ -71,7 +69,7 @@ pub struct RequestVerificationChallenge {
 pub struct VerifyIdentity {
     pub account: String,
     pub field: String,
-    pub challenge: String,
+    pub secret: String,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
@@ -103,17 +101,6 @@ pub struct IdentityInfo {
     pub twitter: Data,
     pub github: Data,
     pub discord: Data,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub enum Judgement {
-    Unknown,
-    FeePaid,
-    Reasonable,
-    KnownGood,
-    OutOfDate,
-    LowQuality,
-    Erroneous,
 }
 
 #[bitflags]
@@ -150,7 +137,7 @@ pub enum WebSocketError {
 
 pub struct WebSocketServer {
     sessions: Arc<DashMap<String, Vec<broadcast::Sender<WebSocketMessage>>>>,
-    challenges: Arc<DashMap<(String, String), String>>, // (account, field) -> challenge
+    secrets: Arc<DashMap<(String, String), String>>,
     verification_states: Arc<DashMap<String, VerificationState>>,
 }
 
@@ -158,7 +145,7 @@ impl WebSocketServer {
     pub fn new() -> Self {
         WebSocketServer {
             sessions: Arc::new(DashMap::new()),
-            challenges: Arc::new(DashMap::new()),
+            secrets: Arc::new(DashMap::new()),
             verification_states: Arc::new(DashMap::new()),
         }
     }
@@ -268,8 +255,8 @@ impl WebSocketServer {
             WebSocketMessage::SubscribeAccountState(account) => {
                 self.subscribe_account_state(account, sender).await?;
             }
-            WebSocketMessage::RequestVerificationChallenge(request) => {
-                self.request_verification_challenge(request, sender).await?;
+            WebSocketMessage::RequestVerificationSecret(request) => {
+                self.request_verification_secret(request, sender).await?;
             }
             WebSocketMessage::VerifyIdentity(verify) => {
                 self.verify_identity(verify, sender).await?;
@@ -286,14 +273,27 @@ impl WebSocketServer {
 
         let verification_state = self.verification_states
             .entry(account.clone())
-            .or_insert_with(|| VerificationState { verified_fields: Vec::new() })
+            .or_insert_with(|| VerificationState { fields: HashMap::new() })
             .clone();
+
+        // Collect pending second challenges for the account
+        let pending_verification_steps: Vec<(String, String)> = self.secrets
+            .iter()
+            .filter_map(|entry| {
+                let ((acct, field), challenge) = entry.pair();
+                if acct == &account {
+                    Some((field.clone(), challenge.clone()))
+                } else {
+                    None
+                }
+            })
+        .collect();
 
         let response = JsonResult::Ok(ResponsePayload::AccountState(ResponseAccountState {
             account: account.clone(),
             info: dummy_info,
-            judgements: vec![(0, Judgement::Reasonable)],
             verification_state,
+            pending_verification_steps,
         }));
 
         self.sessions
@@ -305,29 +305,29 @@ impl WebSocketServer {
         Ok(())
     }
 
-    async fn request_verification_challenge(&self, request: RequestVerificationChallenge, sender: broadcast::Sender<WebSocketMessage>) -> Result<(), WebSocketError> {
-        let challenge = generate_base20_challenge();
-        self.challenges.insert((request.account.clone(), request.field.clone()), challenge.clone());
+    async fn request_verification_secret(&self, request: RequestVerificationSecret, sender: broadcast::Sender<WebSocketMessage>) -> Result<(), WebSocketError> {
+        let secret = generate_base20_secret();
+        self.secrets.insert((request.account.clone(), request.field.clone()), secret.clone());
 
-        let response = JsonResult::Ok(ResponsePayload::Challenge(challenge));
+        let response = JsonResult::Ok(ResponsePayload::Challenge(secret));
         sender.send(WebSocketMessage::JsonResult(response))?;
         Ok(())
     }
 
     // THIS IS ONLY A MOCK IMPLEMENTATION FOR TESTING FRONTEND
     async fn verify_identity(&self, verify: VerifyIdentity, sender: broadcast::Sender<WebSocketMessage>) -> Result<(), WebSocketError> {
-        let stored_challenge = self.challenges.get(&(verify.account.clone(), verify.field.clone()));
+        let stored_secret = self.secrets.get(&(verify.account.clone(), verify.field.clone()));
 
-        let result = if let Some(stored_challenge) = stored_challenge {
-            if *stored_challenge == verify.challenge {
-                self.challenges.remove(&(verify.account.clone(), verify.field.clone()));
+        let result = if let Some(stored_secret) = stored_secret {
+            if *stored_secret == verify.secret {
+                self.secrets.remove(&(verify.account.clone(), verify.field.clone()));
                 self.update_verification_state(&verify.account, &verify.field, true);
                 JsonResult::Ok(ResponsePayload::VerificationResult(true))
             } else {
-                JsonResult::Err("Invalid challenge".to_string())
+                JsonResult::Err("Invalid secret".to_string())
             }
         } else {
-            JsonResult::Err("No challenge found".to_string())
+            JsonResult::Err("No secret found".to_string())
         };
 
         sender.send(WebSocketMessage::JsonResult(result.clone()))?;
@@ -342,15 +342,9 @@ impl WebSocketServer {
     fn update_verification_state(&self, account: &str, field: &str, verified: bool) {
         let mut state = self.verification_states
             .entry(account.to_string())
-            .or_insert_with(|| VerificationState { verified_fields: Vec::new() });
+            .or_insert_with(|| VerificationState { fields: HashMap::new() });
 
-        if verified {
-            if !state.verified_fields.contains(&field.to_string()) {
-                state.verified_fields.push(field.to_string());
-            }
-        } else {
-            state.verified_fields.retain(|f| f != field);
-        }
+        state.fields.insert(field.to_string(), verified);
     }
 
     async fn notify_account_state(&self, account: String) -> Result<(), WebSocketError> {
@@ -359,12 +353,11 @@ impl WebSocketServer {
         let verification_state = self.verification_states
             .get(&account)
             .map(|v| v.clone())
-            .unwrap_or_else(|| VerificationState { verified_fields: Vec::new() });
+            .unwrap_or_else(|| VerificationState { fields: HashMap::new() });
 
         let notification = NotifyAccountState {
             account: account.clone(),
             info: dummy_info,
-            judgements: vec![(0, Judgement::Reasonable)],
             verification_state,
         };
 
@@ -395,7 +388,7 @@ impl WebSocketServer {
     }
 }
 
-fn generate_base20_challenge() -> String {
+fn generate_base20_secret() -> String {
     let mut rng = rand::thread_rng();
     (0..8)
         .map(|_| OLC_ALPHABET.chars().nth(rng.gen_range(0..20)).unwrap())
@@ -405,9 +398,71 @@ fn generate_base20_challenge() -> String {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let server = Arc::new(WebSocketServer::new());
+
+    let dummy_account = "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY".to_string();
+
+    // generate dummy IdentityInfo (without judgements)
+    let dummy_info = IdentityInfo {
+        display: Data::Raw(b"Dummy Display".to_vec()),    // Instantly verified
+        legal: Data::None,
+        web: Data::None,
+        matrix: Data::Raw(b"@dummy:matrix.org".to_vec()),
+        email: Data::Raw(b"dummy@email.com".to_vec()),
+        pgp_fingerprint: None,
+        image: Data::None,
+        twitter: Data::Raw(b"@dummy_twitter".to_vec()),
+        github: Data::None,
+        discord: Data::Raw(b"dummy_discord".to_vec()),
+    };
+
+    // create verification state, marking fields as verified based on existence of data
+    let mut verification_state = VerificationState {
+        fields: HashMap::new(),
+    };
+
+    // Mark `display` as instantly verified
+    if let Data::Raw(_) = dummy_info.display {
+        verification_state.fields.insert("display".to_string(), true);
+    }
+
+    // filter for fields we support
+    for (field, data) in vec![
+        ("matrix", &dummy_info.matrix),
+        ("email", &dummy_info.email),
+        ("twitter", &dummy_info.twitter),
+        ("discord", &dummy_info.discord),
+    ] {
+        // if data is raw, mark as unverified and create challenge by generating secret
+        if let Data::Raw(_) = data {
+            verification_state.fields.insert(field.to_string(), false);
+        }
+    }
+
+    // store the verification state for the dummy account
+    server.verification_states.insert(dummy_account.clone(), verification_state);
+
+    println!("Generated Identity Info: {:?}", dummy_info);
+
+    // pre-populate verification secrets for fields that are not instantly verified
+    for (field, data) in vec![
+        ("matrix", &dummy_info.matrix),
+        ("email", &dummy_info.email),
+        ("twitter", &dummy_info.twitter),
+        ("discord", &dummy_info.discord),
+    ] {
+        if let Data::Raw(_) = data {
+            let secret = generate_base20_secret();
+            server.secrets.insert((dummy_account.clone(), field.to_string()), secret.clone());
+            println!("Pre-generated secret for {}: {}", field, secret);
+        }
+    }
+
+    // start the WebSocket server
     match server.start(8080).await {
         Ok(_) => println!("Server stopped normally"),
         Err(e) => eprintln!("Server error: {:?}", e),
     }
+
     Ok(())
 }
+

@@ -12,10 +12,10 @@ To interact with the API, you can use the WebSocket API available in modern brow
    subscribeAccountState('5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY');
    ```
 
-2. **Request a verification challenge(maybe not needed)**:
+2. **Request a new verification secret(exists as backup for failures)**:
 
    ```typescript
-   requestVerificationChallenge('5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY', 'email');
+   requestVerificationSecret('5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY', 'email');
    ```
 
 3. **Verify identity with a challenge(ONLY FOR DEVELOPMENT PURPOSES)**:
