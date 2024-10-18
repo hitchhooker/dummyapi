@@ -6,8 +6,8 @@ use serde::{Serialize, Deserialize};
 use dashmap::DashMap;
 use tokio::sync::broadcast;
 use tokio::time::Duration;
-use enumflags2::bitflags;
 use thiserror::Error;
+use sp_core::{blake2_256, Encode};
 use rand::Rng;
 
 const MAX_MESSAGE_SIZE: usize = 1024 * 1024; // 1 MB
@@ -27,6 +27,7 @@ pub enum ResponsePayload {
     Challenge(String),
     VerificationResult(bool),
 }
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", content = "payload")]
 #[non_exhaustive]
@@ -48,11 +49,10 @@ pub struct NotifyAccountState {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ResponseAccountState {
     pub account: String,
-    pub info: IdentityInfo,
+    pub hashed_info: String, // Changed from info: IdentityInfo
     pub verification_state: VerificationState,
     pub pending_verification_steps: Vec<(String, String)>,
 }
-
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct VerificationState {
@@ -79,7 +79,7 @@ pub enum JsonResult<T> {
     Err(String),
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Encode)]
 pub enum Data {
     None,
     Raw(Vec<u8>),
@@ -89,7 +89,7 @@ pub enum Data {
     ShaThree256([u8; 32]),
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Encode)]
 pub struct IdentityInfo {
     pub display: Data,
     pub legal: Data,
@@ -101,22 +101,6 @@ pub struct IdentityInfo {
     pub twitter: Data,
     pub github: Data,
     pub discord: Data,
-}
-
-#[bitflags]
-#[repr(u64)]
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum IdentityField {
-    Display,
-    Legal,
-    Web,
-    Matrix,
-    Email,
-    PgpFingerprint,
-    Image,
-    Twitter,
-    GitHub,
-    Discord,
 }
 
 #[derive(Error, Debug)]
@@ -270,13 +254,13 @@ impl WebSocketServer {
 
     async fn subscribe_account_state(&self, account: String, sender: broadcast::Sender<WebSocketMessage>) -> Result<(), WebSocketError> {
         let dummy_info = self.get_dummy_identity_info();
+        let hashed_info = self.hash_identity_info(&dummy_info);
 
         let verification_state = self.verification_states
             .entry(account.clone())
             .or_insert_with(|| VerificationState { fields: HashMap::new() })
             .clone();
 
-        // Collect pending second challenges for the account
         let pending_verification_steps: Vec<(String, String)> = self.secrets
             .iter()
             .filter_map(|entry| {
@@ -291,7 +275,7 @@ impl WebSocketServer {
 
         let response = JsonResult::Ok(ResponsePayload::AccountState(ResponseAccountState {
             account: account.clone(),
-            info: dummy_info,
+            hashed_info,
             verification_state,
             pending_verification_steps,
         }));
@@ -303,6 +287,12 @@ impl WebSocketServer {
 
         sender.send(WebSocketMessage::JsonResult(response))?;
         Ok(())
+    }
+
+    fn hash_identity_info(&self, info: &IdentityInfo) -> String {
+        let encoded_info = info.encode();
+        let hash = blake2_256(&encoded_info);
+        format!("0x{}", hex::encode(hash))
     }
 
     async fn request_verification_secret(&self, request: RequestVerificationSecret, sender: broadcast::Sender<WebSocketMessage>) -> Result<(), WebSocketError> {
@@ -442,6 +432,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     server.verification_states.insert(dummy_account.clone(), verification_state);
 
     println!("Generated Identity Info: {:?}", dummy_info);
+    println!("Hashed Info: {}", server.hash_identity_info(&dummy_info));
+    println!("Dummy Account: {}", dummy_account);
 
     // pre-populate verification secrets for fields that are not instantly verified
     for (field, data) in vec![
