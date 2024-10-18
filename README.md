@@ -25,3 +25,46 @@ To interact with the API, you can use the WebSocket API available in modern brow
    ```typescript
    verifyIdentity('5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY', 'email', 'P6CHJ64R');
    ```
+
+## Subscription payload example
+```json
+{
+  "type": "JsonResult",
+  "payload": {
+    "type": "ok",
+    "message": {
+      "AccountState": {
+        "account": "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY",
+        "hashed_info":
+"0xd6c54c57ae70cbadd44cd2218f2b0c24e980f7e8bd8b43d0c2fea7e19b93f47d",
+        "verification_state": {
+          "fields": {
+            "display": true,
+            "discord": false,
+            "twitter": false,
+            "matrix": false,
+            "email": false
+          }
+        },
+        "pending_challenges": [
+          [
+            "discord",
+            "9M76HV9H"
+          ],
+          [
+            "twitter",
+            "C84HG5PJ"
+          ],
+          [
+            "email",
+            "MH4G5G95"
+          ],
+          [
+            "matrix",
+            "CMWFV57G"
+          ]
+        ]
+      }
+    }
+  }
+}

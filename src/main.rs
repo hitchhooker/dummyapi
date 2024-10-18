@@ -51,7 +51,7 @@ pub struct ResponseAccountState {
     pub account: String,
     pub hashed_info: String, // Changed from info: IdentityInfo
     pub verification_state: VerificationState,
-    pub pending_verification_steps: Vec<(String, String)>,
+    pub pending_challenges: Vec<(String, String)>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -261,7 +261,7 @@ impl WebSocketServer {
             .or_insert_with(|| VerificationState { fields: HashMap::new() })
             .clone();
 
-        let pending_verification_steps: Vec<(String, String)> = self.secrets
+        let pending_challenges: Vec<(String, String)> = self.secrets
             .iter()
             .filter_map(|entry| {
                 let ((acct, field), challenge) = entry.pair();
@@ -277,7 +277,7 @@ impl WebSocketServer {
             account: account.clone(),
             hashed_info,
             verification_state,
-            pending_verification_steps,
+            pending_challenges,
         }));
 
         self.sessions
