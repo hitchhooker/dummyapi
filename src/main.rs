@@ -8,10 +8,11 @@ use tokio::sync::broadcast;
 use tokio::time::Duration;
 use thiserror::Error;
 use sp_core::{blake2_256, Encode};
-use rand::Rng;
+use rand::rngs::OsRng;
+use rand::RngCore;
 
-const MAX_MESSAGE_SIZE: usize = 1024 * 1024; // 1 MB
-const TIMEOUT_DURATION: Duration = Duration::from_secs(300); // 5 minutes
+const MAX_MESSAGE_SIZE: usize = 256 * 1024; // 256 KB
+const TIMEOUT_DURATION: Duration = Duration::from_secs(120); // 2 minutes
 const OLC_ALPHABET: &str = "23456789CFGHJMPQRVWX"; // human-friendly secrets
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -24,7 +25,7 @@ pub struct VersionedMessage {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ResponsePayload {
     AccountState(ResponseAccountState),
-    Challenge(String),
+    Secret(String),
     VerificationResult(bool),
 }
 
@@ -56,7 +57,7 @@ pub struct ResponseAccountState {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct VerificationState {
-    pub fields: HashMap<String, bool>, // Maps field name to a boolean indicating verification status
+    pub fields: HashMap<String, bool>, // TODO: use bitflags?
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -299,7 +300,7 @@ impl WebSocketServer {
         let secret = generate_base20_secret();
         self.secrets.insert((request.account.clone(), request.field.clone()), secret.clone());
 
-        let response = JsonResult::Ok(ResponsePayload::Challenge(secret));
+        let response = JsonResult::Ok(ResponsePayload::Secret(secret));
         sender.send(WebSocketMessage::JsonResult(response))?;
         Ok(())
     }
@@ -379,9 +380,9 @@ impl WebSocketServer {
 }
 
 fn generate_base20_secret() -> String {
-    let mut rng = rand::thread_rng();
+    let mut rng = OsRng;
     (0..8)
-        .map(|_| OLC_ALPHABET.chars().nth(rng.gen_range(0..20)).unwrap())
+        .map(|_| OLC_ALPHABET.chars().nth(rng.next_u32() as usize % OLC_ALPHABET.len()).unwrap())
         .collect()
 }
 
@@ -410,7 +411,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         fields: HashMap::new(),
     };
 
-    // Mark `display` as instantly verified
+    // mark `display` as instantly verified
     if let Data::Raw(_) = dummy_info.display {
         verification_state.fields.insert("display".to_string(), true);
     }
