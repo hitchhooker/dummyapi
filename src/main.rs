@@ -42,6 +42,7 @@ pub enum WebSocketMessage {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct NotifyAccountState {
+    pub network: String,
     pub account: String,
     pub info: IdentityInfo,
     pub verification_state: VerificationState,
@@ -49,6 +50,7 @@ pub struct NotifyAccountState {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ResponseAccountState {
+    pub network: String,
     pub account: String,
     pub hashed_info: String, // Changed from info: IdentityInfo
     pub verification_state: VerificationState,
@@ -275,6 +277,7 @@ impl WebSocketServer {
         .collect();
 
         let response = JsonResult::Ok(ResponsePayload::AccountState(ResponseAccountState {
+            network: "rococo".to_string(),
             account: account.clone(),
             hashed_info,
             verification_state,
@@ -347,6 +350,7 @@ impl WebSocketServer {
             .unwrap_or_else(|| VerificationState { fields: HashMap::new() });
 
         let notification = NotifyAccountState {
+            network: "rococo".to_string(),
             account: account.clone(),
             info: dummy_info,
             verification_state,
@@ -458,4 +462,3 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
-
